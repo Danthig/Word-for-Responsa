@@ -13,7 +13,6 @@ Option Explicit
 '==============================================================================
 
 '---- settings ----------------------------------------------------------------
-Private Const RESPONSA_PATH As String = "C:\Program Files (x86)\ResponsaCD29C\RESPONSA.exe"
 Private Const CMD_OPEN_SEARCH As Long = 32857
 Private Const CMD_OPEN_CITATION As Long = 32781
 Private Const ID_SEARCH_EDIT As Long = 1233
@@ -115,7 +114,7 @@ Public Sub SearchSelectionInBarIlanCitation()
 End Sub
 
 Private Sub RunSearch(ByVal advanced As Boolean)
-    Dim q As String
+    Dim q As String, promptFound As Boolean
     If Selection.Type = wdSelectionIP Then
         MsgBox "No text selected.", vbInformation
         Exit Sub
@@ -131,7 +130,7 @@ Private Sub RunSearch(ByVal advanced As Boolean)
     Dim hMain As LongPtr
     hMain = EnsureResponsaRunning()
     If hMain = 0 Then
-        MsgBox "RESPONSA is not running (and RESPONSA_PATH is not set).", vbExclamation
+        MsgBox "Could not find or start RESPONSA. Start it manually or set the RESPONSA_PATH environment variable to the full path of RESPONSA.exe.", vbExclamation
         Exit Sub
     End If
 
@@ -154,8 +153,9 @@ Private Sub RunSearch(ByVal advanced As Boolean)
         MsgBox "Could not start the RESPONSA search.", vbExclamation
         Exit Sub
     End If
-    Sleep 200
-    BringToFront hMain                          ' exactly once, no verification, no retry
+    If Not FocusSearchAllPrompt(hMain, promptFound) Then
+        If Not promptFound Then BringToFront hMain
+    End If
 End Sub
 
 Private Sub RunCitationSearch()
@@ -174,7 +174,7 @@ Private Sub RunCitationSearch()
     Dim hMain As LongPtr
     hMain = EnsureResponsaRunning()
     If hMain = 0 Then
-        MsgBox "RESPONSA is not running (and RESPONSA_PATH is not set).", vbExclamation
+        MsgBox "Could not find or start RESPONSA. Start it manually or set the RESPONSA_PATH environment variable to the full path of RESPONSA.exe.", vbExclamation
         Exit Sub
     End If
 
@@ -404,14 +404,19 @@ Private Function FindMainWindow() As LongPtr
 End Function
 
 Private Function EnsureResponsaRunning() As LongPtr
-    Dim h As LongPtr, t0 As Double
+    Dim h As LongPtr, t0 As Double, responsaPath As String
     h = FindMainWindow()
     If h <> 0 Then
         EnsureResponsaRunning = h
         Exit Function
     End If
-    If Len(RESPONSA_PATH) = 0 Then Exit Function
-    Shell """" & RESPONSA_PATH & """", vbNormalFocus
+    responsaPath = Trim$(Environ$("RESPONSA_PATH"))
+    If Len(responsaPath) = 0 Then Exit Function
+    If Left$(responsaPath, 1) = """" And Right$(responsaPath, 1) = """" Then
+        responsaPath = Mid$(responsaPath, 2, Len(responsaPath) - 2)
+    End If
+    If Len(Dir$(responsaPath)) = 0 Then Exit Function
+    Shell """" & responsaPath & """", vbNormalFocus
     t0 = Timer
     Do
         Sleep 500
@@ -746,6 +751,61 @@ Private Sub CloseLeftoverModals()
     If closed Then Sleep 300: DoEvents          ' only wait if something was closed
 End Sub
 
+' Wait briefly for the no-results prompt. Do not bring the search window back
+' to the foreground while that prompt is open.
+Private Function FocusSearchAllPrompt(ByVal hMain As LongPtr, ByRef promptFound As Boolean) As Boolean
+    Dim i As Long, v As Variant, h As LongPtr, yesButton As LongPtr
+    Dim fg As LongPtr, fgTid As Long, dlgTid As Long, myTid As Long
+    Dim dummy As Long, attachedFg As Boolean, attachedDlg As Boolean, attempt As Long
+
+    For i = 1 To 20
+        CollectResponsaWindows
+        For Each v In mWins
+            h = CLngPtr(v)
+            If IsInfoOrResultModal(h) Then
+                If FindButton(h, TxtYes()) <> 0 And FindButton(h, TxtNo()) <> 0 Then
+                    promptFound = True
+                    yesButton = FindButton(h, TxtYes())
+                    Exit For
+                End If
+            End If
+        Next
+        If promptFound Then Exit For
+        Sleep 100
+        DoEvents
+    Next
+    If Not promptFound Then Exit Function
+
+    fg = GetForegroundWindow()
+    fgTid = GetWindowThreadProcessId(fg, dummy)
+    dlgTid = GetWindowThreadProcessId(h, dummy)
+    myTid = GetCurrentThreadId()
+
+    If fgTid <> 0 And fgTid <> myTid Then
+        attachedFg = (AttachThreadInput(myTid, fgTid, 1) <> 0)
+    End If
+    If dlgTid <> 0 And dlgTid <> myTid And dlgTid <> fgTid Then
+        attachedDlg = (AttachThreadInput(myTid, dlgTid, 1) <> 0)
+    End If
+
+    On Error GoTo CleanUp
+    For attempt = 1 To 3
+        BringWindowToTop hMain
+        BringWindowToTop h
+        SetForegroundWindow h
+        SetFocus yesButton
+        If GetForegroundWindow() = h Then
+            FocusSearchAllPrompt = True
+            Exit For
+        End If
+        Sleep 100
+    Next
+
+CleanUp:
+    If attachedDlg Then AttachThreadInput myTid, dlgTid, 0
+    If attachedFg Then AttachThreadInput myTid, fgTid, 0
+End Function
+
 '==============================================================================
 ' Bring RESPONSA or its citation dialog to the foreground. Temporarily attach
 ' the input queues of the foreground window, Word, and the target dialog.
@@ -825,6 +885,8 @@ End Function
 Private Function TxtSearch() As String: TxtSearch = Heb(1489, 1510, 1506, 32, 1495, 1497, 1508, 1493, 1513): End Function
 Private Function TxtBrowseTitle() As String: TxtBrowseTitle = Heb(1506, 1497, 1493, 1503): End Function
 Private Function TxtOk() As String: TxtOk = Heb(1488, 1497, 1513, 1493, 1512): End Function
+Private Function TxtYes() As String: TxtYes = Heb(1499, 1503): End Function
+Private Function TxtNo() As String: TxtNo = Heb(1500, 1488): End Function
 Private Function TxtCancel() As String: TxtCancel = Heb(1489, 1497, 1496, 1493, 1500): End Function
 Private Function TxtInfoTitle() As String: TxtInfoTitle = Heb(1502, 1497, 1491, 1506): End Function
 Private Function TxtResultsWord() As String: TxtResultsWord = Heb(1514, 1493, 1510, 1488, 1493, 1514): End Function
