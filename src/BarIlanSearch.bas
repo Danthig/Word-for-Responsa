@@ -15,6 +15,7 @@ Option Explicit
 Private Const RESPONSA_PATH As String = ""      ' optional: full path to RESPONSA.exe
 Private Const CMD_OPEN_SEARCH As Long = 32857
 Private Const ID_SEARCH_EDIT As Long = 1233
+Private Const ID_EASY_BTN As Long = 1207       ' mode button observed in Responsa v29
 Private Const ID_ADVANCED_BTN As Long = 1209    ' button that switches to "advanced search"
 Private Const ID_ADVANCED_ONLY As Long = 1065   ' control that exists only in advanced mode
 Private Const MAX_WORDS As Long = 10
@@ -33,6 +34,7 @@ Private Const ADV_DISTANCE As String = "30:"    ' distance, written once in fron
 Private Const WM_COMMAND As Long = &H111
 Private Const WM_SETTEXT As Long = &HC
 Private Const WM_GETTEXT As Long = &HD
+Private Const EN_CHANGE As Long = &H300
 Private Const BM_CLICK As Long = &HF5
 Private Const SMTO_ABORTIFHUNG As Long = 2
 Private Const GW_OWNER As Long = 4
@@ -44,6 +46,7 @@ Private Const GMEM_MOVEABLE As Long = 2
 Private Declare PtrSafe Function EnumWindows Lib "user32" (ByVal lpEnumFunc As LongPtr, ByVal lParam As LongPtr) As Long
 Private Declare PtrSafe Function EnumChildWindows Lib "user32" (ByVal hWndParent As LongPtr, ByVal lpEnumFunc As LongPtr, ByVal lParam As LongPtr) As Long
 Private Declare PtrSafe Function GetWindowThreadProcessId Lib "user32" (ByVal hWnd As LongPtr, ByRef lpdwProcessId As Long) As Long
+Private Declare PtrSafe Function GetParent Lib "user32" (ByVal hWnd As LongPtr) As LongPtr
 Private Declare PtrSafe Function IsWindowVisible Lib "user32" (ByVal hWnd As LongPtr) As Long
 Private Declare PtrSafe Function IsIconic Lib "user32" (ByVal hWnd As LongPtr) As Long
 Private Declare PtrSafe Function ShowWindow Lib "user32" (ByVal hWnd As LongPtr, ByVal nCmdShow As Long) As Long
@@ -134,8 +137,10 @@ Private Sub RunSearch(ByVal advanced As Boolean)
         MsgBox "Could not write the text into the search box.", vbExclamation
         Exit Sub
     End If
-    Sleep 300                                   ' let the dialog take the text
-    PostMessageW hBtn, BM_CLICK, 0, 0           ' async: the button opens a modal
+    If PostMessageW(hBtn, BM_CLICK, 0, 0) = 0 Then
+        MsgBox "Could not start the RESPONSA search.", vbExclamation
+        Exit Sub
+    End If
     Sleep 200
     BringToFront hMain                          ' exactly once, no verification, no retry
 End Sub
@@ -361,8 +366,16 @@ Private Function TextOf(ByVal h As LongPtr) As String
 End Function
 
 Private Function SetText(ByVal h As LongPtr, ByVal s As String) As Boolean
-    Dim r As LongPtr
-    SetText = (SendMessageTimeoutW(h, WM_SETTEXT, 0, StrPtr(s), SMTO_ABORTIFHUNG, 2000, r) <> 0)
+    Dim r As LongPtr, hParent As LongPtr, notify As LongPtr
+    If SendMessageTimeoutW(h, WM_SETTEXT, 0, StrPtr(s), SMTO_ABORTIFHUNG, 2000, r) = 0 Then Exit Function
+    If TextOf(h) <> s Then Exit Function
+
+    ' WM_SETTEXT changes the edit's text but does not send the EN_CHANGE
+    ' notification that updates Responsa's remembered search query.
+    hParent = GetParent(h)
+    If hParent = 0 Then Exit Function
+    notify = CLngPtr((GetDlgCtrlID(h) And &HFFFF&) Or (EN_CHANGE * &H10000))
+    SetText = (SendMessageTimeoutW(hParent, WM_COMMAND, notify, h, SMTO_ABORTIFHUNG, 2000, r) <> 0)
 End Function
 
 Private Function NormCaption(ByVal s As String) As String
@@ -412,49 +425,60 @@ End Function
 
 '==============================================================================
 ' Search dialog. RESPONSA creates all search dialogs (easy / table / advanced /
-' free text) and shows only the selected one; a hidden one runs a search fine.
-' So the dialog is picked by its title - mode 0 = easy, 1 = advanced, 2 = any.
+' free text) and hides all but the selected one. Only the visible dialog is safe
+' to use: a hidden dialog can display a new query without updating the active
+' search state used by the "search all databases" prompt.
 '==============================================================================
 Private Function FindSearchDialog(ByVal mode As Long, ByRef btn As LongPtr, ByRef edt As LongPtr) As LongPtr
-    Dim pass As Long, v As Variant, h As LongPtr, b As LongPtr, e As LongPtr
+    Dim v As Variant, h As LongPtr, b As LongPtr, e As LongPtr
     Dim title As String, isAdv As Boolean, ok As Boolean
     CollectResponsaWindows
-    For pass = 1 To 2                        ' visible first, hidden as fallback
-        For Each v In mWins
-            h = CLngPtr(v)
-            If pass = 2 Or IsWindowVisible(h) <> 0 Then
-                e = GetDlgItem(h, ID_SEARCH_EDIT)
-                If e <> 0 Then
-                    b = FindButton(h, TxtSearch())
-                    If b <> 0 And mEdits <= MAX_EDITS Then
-                        title = NormCaption(TextOf(h))
-                        isAdv = (ChildById(h, ID_ADVANCED_ONLY) <> 0)
-                        Select Case mode
-                            Case 0: ok = (Not isAdv) And (InStr(title, TxtEasyTitle()) > 0)
-                            Case 1: ok = isAdv Or (InStr(title, TxtAdvTitle()) > 0)
-                            Case Else: ok = True
-                        End Select
-                        If ok Then
-                            btn = b
-                            edt = e
-                            FindSearchDialog = h
-                            Exit Function
-                        End If
+    For Each v In mWins
+        h = CLngPtr(v)
+        If IsWindowVisible(h) <> 0 Then
+            e = GetDlgItem(h, ID_SEARCH_EDIT)
+            If e <> 0 Then
+                b = FindButton(h, TxtSearch())
+                If b <> 0 And mEdits <= MAX_EDITS Then
+                    title = NormCaption(TextOf(h))
+                    isAdv = (ChildById(h, ID_ADVANCED_ONLY) <> 0)
+                    Select Case mode
+                        Case 0: ok = (Not isAdv) And (InStr(title, TxtEasyTitle()) > 0)
+                        Case 1: ok = isAdv Or (InStr(title, TxtAdvTitle()) > 0)
+                        Case Else: ok = True
+                    End Select
+                    If ok Then
+                        btn = b
+                        edt = e
+                        FindSearchDialog = h
+                        Exit Function
                     End If
                 End If
             End If
-        Next
+        End If
     Next
 End Function
 
 ' open the search dialogs (command resent every few seconds) and return the one
-' for the wanted mode
+' for the wanted mode. If another search mode is visible, switch that dialog
+' instead of filling one of Responsa's hidden, inactive dialogs.
 Private Function EnsureSearchDialog(ByVal hMain As LongPtr, ByVal advanced As Boolean, ByRef btn As LongPtr, ByRef edt As LongPtr) As LongPtr
-    Dim h As LongPtr, t0 As Double, tSent As Double, mode As Long
+    Dim h As LongPtr, t0 As Double, tSent As Double, mode As Long, switchAttempted As Boolean
     mode = IIf(advanced, 1, 0)
 
     h = FindSearchDialog(mode, btn, edt)
     If h <> 0 Then EnsureSearchDialog = h: Exit Function
+
+    h = FindSearchDialog(2, btn, edt)
+    If h <> 0 Then
+        switchAttempted = True
+        If advanced Then
+            EnsureSearchDialog = EnsureAdvancedMode(h, btn, edt)
+        Else
+            EnsureSearchDialog = EnsureEasyMode(h, btn, edt)
+        End If
+        If EnsureSearchDialog <> 0 Then Exit Function
+    End If
 
     t0 = Timer
     tSent = -100
@@ -467,29 +491,32 @@ Private Function EnsureSearchDialog(ByVal hMain As LongPtr, ByVal advanced As Bo
         DoEvents
         h = FindSearchDialog(mode, btn, edt)
         If h <> 0 Then EnsureSearchDialog = h: Exit Function
-        ' dialogs exist but none matched by title (other language edition?)
-        If Timer - t0 >= FALLBACK_AFTER_SEC Then
+        If Not switchAttempted And Timer - t0 >= FALLBACK_AFTER_SEC Then
             h = FindSearchDialog(2, btn, edt)
-            If h <> 0 Then Exit Do
+            If h <> 0 Then
+                switchAttempted = True
+                If advanced Then
+                    EnsureSearchDialog = EnsureAdvancedMode(h, btn, edt)
+                Else
+                    EnsureSearchDialog = EnsureEasyMode(h, btn, edt)
+                End If
+                If EnsureSearchDialog <> 0 Then Exit Function
+            End If
         End If
     Loop While Timer - t0 < DIALOG_WAIT_SEC
-    If h = 0 Then Exit Function
-
-    If advanced Then
-        EnsureSearchDialog = EnsureAdvancedMode(h, btn, edt)
-    Else
-        EnsureSearchDialog = h
-    End If
 End Function
 
-' fallback: switch the visible dialog to "advanced search" with its mode button
+' switch the visible dialog to "advanced search" with its mode button
 Private Function EnsureAdvancedMode(ByVal hDlg As LongPtr, ByRef btn As LongPtr, ByRef edt As LongPtr) As LongPtr
     Dim b As LongPtr, d As LongPtr, t0 As Double
-    If ChildById(hDlg, ID_ADVANCED_ONLY) <> 0 Then EnsureAdvancedMode = hDlg: Exit Function
+    If ChildById(hDlg, ID_ADVANCED_ONLY) <> 0 Or InStr(NormCaption(TextOf(hDlg)), TxtAdvTitle()) > 0 Then
+        EnsureAdvancedMode = FindSearchDialog(1, btn, edt)
+        Exit Function
+    End If
 
     b = ChildById(hDlg, ID_ADVANCED_BTN)
     If b = 0 Then Exit Function
-    PostMessageW b, BM_CLICK, 0, 0
+    If PostMessageW(b, BM_CLICK, 0, 0) = 0 Then Exit Function
 
     t0 = Timer
     Do
@@ -497,6 +524,26 @@ Private Function EnsureAdvancedMode(ByVal hDlg As LongPtr, ByRef btn As LongPtr,
         DoEvents
         d = FindSearchDialog(1, btn, edt)
         If d <> 0 Then EnsureAdvancedMode = d: Exit Function
+    Loop While Timer - t0 < 6
+End Function
+
+Private Function EnsureEasyMode(ByVal hDlg As LongPtr, ByRef btn As LongPtr, ByRef edt As LongPtr) As LongPtr
+    Dim b As LongPtr, d As LongPtr, t0 As Double
+    If InStr(NormCaption(TextOf(hDlg)), TxtEasyTitle()) > 0 Then
+        EnsureEasyMode = FindSearchDialog(0, btn, edt)
+        Exit Function
+    End If
+
+    b = ChildById(hDlg, ID_EASY_BTN)
+    If b = 0 Then Exit Function
+    If PostMessageW(b, BM_CLICK, 0, 0) = 0 Then Exit Function
+
+    t0 = Timer
+    Do
+        Sleep 150
+        DoEvents
+        d = FindSearchDialog(0, btn, edt)
+        If d <> 0 Then EnsureEasyMode = d: Exit Function
     Loop While Timer - t0 < 6
 End Function
 
