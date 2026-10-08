@@ -26,6 +26,7 @@ Private Const CITATION_TAB_INDEX As Long = 1    ' "Write Sources" tab in Respons
 Private Const MAX_WORDS As Long = 10
 Private Const MAX_EDITS As Long = 4
 Private Const DIALOG_WAIT_SEC As Double = 12
+Private Const SEARCH_PROMPT_WAIT_SEC As Double = 1
 Private Const RESEND_EVERY_SEC As Double = 3
 Private Const FALLBACK_AFTER_SEC As Double = 3  ' no title match -> accept any search dialog
 Private Const FOCUS_STRONG As Boolean = False   ' True = also SwitchToThisWindow (if focus fails)
@@ -153,9 +154,8 @@ Private Sub RunSearch(ByVal advanced As Boolean)
         MsgBox "Could not start the RESPONSA search.", vbExclamation
         Exit Sub
     End If
-    If Not FocusSearchAllPrompt(hMain, promptFound) Then
-        If Not promptFound Then BringToFront hMain
-    End If
+    BringSearchToFront hMain
+    Call FocusSearchAllPrompt(hMain, promptFound)
 End Sub
 
 Private Sub RunCitationSearch()
@@ -758,7 +758,7 @@ Private Function FocusSearchAllPrompt(ByVal hMain As LongPtr, ByRef promptFound 
     Dim fg As LongPtr, fgTid As Long, dlgTid As Long, myTid As Long
     Dim dummy As Long, attachedFg As Boolean, attachedDlg As Boolean, attempt As Long
 
-    For i = 1 To 20
+    For i = 1 To SEARCH_PROMPT_WAIT_SEC * 20
         CollectResponsaWindows
         For Each v In mWins
             h = CLngPtr(v)
@@ -771,7 +771,7 @@ Private Function FocusSearchAllPrompt(ByVal hMain As LongPtr, ByRef promptFound 
             End If
         Next
         If promptFound Then Exit For
-        Sleep 100
+        Sleep 50
         DoEvents
     Next
     If Not promptFound Then Exit Function
@@ -869,6 +869,18 @@ Private Sub BringToFront(ByVal hMain As LongPtr)
 
     If tgtTid <> 0 And tgtTid <> myTid Then AttachThreadInput myTid, tgtTid, 0
     If fgTid <> 0 And fgTid <> myTid Then AttachThreadInput myTid, fgTid, 0
+End Sub
+
+Private Sub BringSearchToFront(ByVal hMain As LongPtr)
+    Dim hTop As LongPtr
+
+    hTop = GetLastActivePopup(hMain)
+    If hTop = 0 Then hTop = hMain
+    If IsIconic(hMain) <> 0 Then ShowWindow hMain, SW_RESTORE
+
+    BringWindowToTop hMain
+    BringWindowToTop hTop
+    SetForegroundWindow hTop
 End Sub
 
 '==============================================================================
